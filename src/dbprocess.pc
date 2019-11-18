@@ -1,0 +1,321 @@
+#include <stdio.h>
+#include "dbprocess.h"
+#include "frame_utils.h"
+#include "logprocess.h"
+#include "iniprocess.h"
+#include "taskitem.h"
+#include "taskmanager.h"
+
+extern char *TASK_INI;
+extern char g_db_time[17]; 
+EXEC SQL DECLARE db236 DATABASE;
+EXEC SQL INCLUDE SQLCA;
+EXEC SQL INCLUDE SQLDA;
+int connect_oracle(const char *file)
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+		char username[20];
+		char password[20];
+		char oraclename[20];
+	EXEC SQL END DECLARE SECTION;
+	
+	strcpy(username,read_ini_string(permanent_pool,file,TASK_CAPTION,"DB_USER",""));
+	strcpy(password,read_ini_string(permanent_pool,file,TASK_CAPTION,"DB_PASS",""));
+	strcpy(oraclename,read_ini_string(permanent_pool,file,TASK_CAPTION,"DB_NAME",""));
+
+	EXEC SQL CONNECT:username IDENTIFIED BY:password AT db236 using :oraclename;
+	if(sqlca.sqlcode == 0)
+		LOG_MSG(" connect oracle [%s/%s@%s] success.", username,password,oraclename);
+	else
+		LOG_MSG(" connect oracle [%s/%s@%s] error  [%d:%s].", username,password,oraclename, sqlca.sqlcode,sqlca.sqlerrm.sqlerrmc);
+	return sqlca.sqlcode;
+}
+
+int disconnect_oracle()
+{
+	EXEC SQL AT db236 COMMIT WORK RELEASE ;
+	return 0;
+}	
+
+int CheckSqlResult()
+{
+    if(sqlca.sqlcode == 0)
+    {
+        return db_ok;
+    }
+    else
+    {
+        if(sqlca.sqlcode == 1403)
+        {
+            return db_nofound;
+        }
+
+        if(sqlca.sqlcode == -12571 || sqlca.sqlcode == -1089 || sqlca.sqlcode == -1090 || sqlca.sqlcode == -3114 || sqlca.sqlcode == -3113 || sqlca.sqlcode == -1092 || sqlca.sqlcode == -12326 || sqlca.sqlcode == -12329 || sqlca.sqlcode == -1012)
+        {          
+            return db_breaken;
+        }
+        else
+        {
+            return db_error;
+        }
+    }
+}
+
+int ExecuteSql(const char *sql,bool bCommit)
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+		char sqlCmd[512];
+	EXEC SQL END DECLARE SECTION;
+	strncpy(sqlCmd, sql, sizeof(sqlCmd));
+
+	EXEC SQL AT db236 PREPARE sql_stmt FROM :sqlCmd;
+    EXEC SQL AT db236 EXECUTE sql_stmt;
+	if(sqlca.sqlcode != 0)
+	{
+		LOG_MSG("sql [%s] error [%s]", sql,sqlca.sqlerrm.sqlerrmc);
+		Rollback();
+	}	
+	else if(bCommit)
+	{
+		Commit();
+	}
+	int ret = CheckSqlResult();
+	if(ret == db_breaken)
+	{
+		disconnect_oracle();
+		connect_oracle(TASK_INI);
+	}
+	return ret;
+}
+
+int Commit()             
+{
+    EXEC SQL AT db236 COMMIT;
+    return sqlca.sqlcode >= 0;
+}
+
+int Rollback()           
+{
+    EXEC SQL AT db236  ROLLBACK;
+    return sqlca.sqlcode >= 0;
+}
+
+
+int create_task_item_list_by_db_updated(int program_id)
+{
+         EXEC SQL BEGIN DECLARE SECTION;
+                int nCount = 0;
+                int prg_id;
+                int ftpparm_id;
+                int del_src;
+                int copy_flag;
+                int direction;
+                int file_modify_time_escape;
+                int generate_db_cdr;
+                int use_tmp;
+                char ftp_host[256];
+                char ftp_path[256];
+                char local_path[256];
+                char file_pattern[128];
+                char month[16];
+                char day[16];
+                char hour[16];
+                char min[16];
+                char sh_file[256];
+                char son_dir_mask[256];
+                char cp_dir_1[256];
+                char cp_dir_2[256];
+                char cp_dir_3[256];
+                char cp_dir_4[256];
+                int  ftp_flag; 
+                char db_time[17];
+        EXEC SQL END DECLARE SECTION;
+        prg_id = program_id;
+        struct TASK_ITEM  *_cur,*_tail;
+		_cur = _task_list;
+		while(_cur)
+		{
+		  _tail = _cur;
+		   _cur = _cur->next;		   
+		}
+        strcpy(db_time,g_db_time); 
+        EXEC SQL at db236 DECLARE cfg_cursor_updated CURSOR for select ftpparm_id,ftp_host,ftp_path,local_path,Nvl(file_pattern,'^.*'),direction,Nvl(month,'*'),Nvl(day,'*'),Nvl(hour,'*'),Nvl(min,'*'),del_src,Nvl(sh_file,'NO'),Nvl(son_dir_mask,'NULL'),Nvl(cp_dir_1,'NULL'),Nvl(cp_dir_2,'NULL'),Nvl(cp_dir_3,'NULL'),Nvl(cp_dir_4,'NULL'), file_modify_time_escape,generate_db_cdr,use_tmp,nvl(copy_flag,0),ftp_flag,to_char(sysdate,'YYYYMMDDHH24MISS') from tb_cfg_filecollection where Program_id =:prg_id  and opt_time >= to_date(:db_time,'YYYYMMDDHH24MISS');
+        EXEC SQL at db236 OPEN cfg_cursor_updated;
+        while(1)
+        {
+                EXEC SQL at db236 FETCH cfg_cursor_updated INTO :ftpparm_id,:ftp_host,:ftp_path,:local_path,:file_pattern,:direction,:month,:day,:hour,:min,:del_src,:sh_file,:son_dir_mask,:cp_dir_1,:cp_dir_2,:cp_dir_3,:cp_dir_4,:file_modify_time_escape,:generate_db_cdr,:use_tmp,:copy_flag,:ftp_flag,:db_time;
+                if(sqlca.sqlcode)
+                {
+                  if(sqlca.sqlcode != 1403)
+                     LOG_MSG("create_task_item_list_by_db error:%s .",sqlca.sqlerrm.sqlerrmc);
+                  break;
+                }
+                struct TASK_ITEM *_task = _task_list;
+				int _nflag = 0;
+				while(_task)
+				{
+				   if( _task->sch_item.id == ftpparm_id){ 
+				   _nflag = 1;
+                                   break;
+                                   }
+                                   _task = _task->next;
+				}
+				if(_task==NULL) _task=(TASK_ITEM *)pcalloc(permanent_pool, sizeof(*_task));
+		memset(&_task->sch_item,0,sizeof(_task->sch_item));		
+                _task->sch_item.id=ftpparm_id;
+                if ( _task->sch_item.id==0 )
+                    continue;
+                //memset(&_task->sch_item,0,sizeof(_task->sch_item));
+                strcpy( _task->sch_item.month, trim(month,"*"));
+                strcpy( _task->sch_item.day, trim(day,"*"));
+                strcpy( _task->sch_item.hour, trim(hour,"*"));
+                strcpy( _task->sch_item.min, trim(min,"*"));
+
+                _task->sch_item.func=start_task;
+                _task->sch_item.arg=_task->sch_item.id;
+
+				memset(_task->ftp_host,0,sizeof(_task->ftp_host));
+                strcpy( _task->ftp_host, trim(ftp_host,"NULL"));
+
+				memset(_task->ftp_path,0,sizeof(_task->ftp_path));
+                strcpy( _task->ftp_path, trim(ftp_path,"NULL"));
+
+				memset(_task->local_path,0,sizeof(_task->local_path));
+                strcpy( _task->local_path, trim(local_path,"NULL"));
+
+				memset(_task->file,0,sizeof(_task->file));
+                strcpy( _task->file, trim(file_pattern,"NULL"));
+
+                _task->direction = direction;
+                _task->del_src = del_src;
+                _task->file_ctime_escape = file_modify_time_escape;
+                _task->use_tmp = use_tmp;
+                _task->copy_flag = copy_flag;
+                _task->generate_db_cdr = generate_db_cdr;
+
+				memset(_task->sh_file,0,sizeof(_task->sh_file));
+                strcpy(_task->sh_file, trim(sh_file,"NO"));
+
+				memset(_task->son_dir_mask,0,sizeof(_task->son_dir_mask));
+                strcpy(_task->son_dir_mask,trim(son_dir_mask,"NULL"));
+
+				memset(_task->cp_dir_1,0,sizeof(_task->cp_dir_1));
+                strcpy(_task->cp_dir_1, trim(cp_dir_1,"NULL"));
+
+				memset(_task->cp_dir_2,0,sizeof(_task->cp_dir_2));
+                strcpy(_task->cp_dir_2, trim(cp_dir_2,"NULL"));
+				
+				memset(_task->cp_dir_3,0,sizeof(_task->cp_dir_3));
+                strcpy(_task->cp_dir_3, trim(cp_dir_3,"NULL"));
+
+				memset(_task->cp_dir_4,0,sizeof(_task->cp_dir_4));
+                strcpy(_task->cp_dir_4, trim(cp_dir_4,"NULL"));
+                _task->ftp_flag = ftp_flag;
+                strcpy(g_db_time,(const char*)db_time);
+                if(_nflag == 0)
+                {
+                   _tail->next = _task;
+		   _tail = _task;
+                   _tail->next = NULL;
+                }
+                nCount +=1;
+        }
+        EXEC SQL at db236 close cfg_cursor_updated;
+        LOG_MSG("Get ftp task count [%d].", nCount);
+//        printf("Get ftp task count [%d].\n", nCount);
+        return nCount; 
+}
+
+
+
+int create_task_item_list_by_db(int program_id)
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+		int nCount = 0;
+		int prg_id;
+		int ftpparm_id;
+		int del_src;
+		int copy_flag;
+		int direction;
+		int file_modify_time_escape;
+		int generate_db_cdr;
+		int use_tmp;
+		char ftp_host[256];
+		char ftp_path[256];
+		char local_path[256];
+		char file_pattern[128];		
+		char month[16];
+		char day[16];
+		char hour[16];
+		char min[16];		
+		char sh_file[256];
+		char son_dir_mask[256];
+		char cp_dir_1[256];
+		char cp_dir_2[256];
+		char cp_dir_3[256];
+		char cp_dir_4[256];
+                int  ftp_flag;
+                varchar db_time[17];
+	EXEC SQL END DECLARE SECTION;
+	prg_id = program_id;
+	struct TASK_ITEM  *_cur=_task_list;
+
+	EXEC SQL at db236 DECLARE cfg_cursor CURSOR for select ftpparm_id,ftp_host,ftp_path,local_path,Nvl(file_pattern,'^.*'),direction,Nvl(month,'*'),Nvl(day,'*'),Nvl(hour,'*'),Nvl(min,'*'),del_src,Nvl(sh_file,'NO'),Nvl(son_dir_mask,'NULL'),Nvl(cp_dir_1,'NULL'),Nvl(cp_dir_2,'NULL'),Nvl(cp_dir_3,'NULL'),Nvl(cp_dir_4,'NULL'), file_modify_time_escape,generate_db_cdr,use_tmp,nvl(copy_flag,0),ftp_flag,to_char(sysdate,'YYYYMMDDHH24MISS') from tb_cfg_filecollection where Program_id =:prg_id and Ftp_Flag=1;	
+	EXEC SQL at db236 OPEN cfg_cursor;
+	while(1) 
+	{
+		EXEC SQL at db236 FETCH cfg_cursor INTO :ftpparm_id,:ftp_host,:ftp_path,:local_path,:file_pattern,:direction,:month,:day,:hour,:min,:del_src,:sh_file,:son_dir_mask,:cp_dir_1,:cp_dir_2,:cp_dir_3,:cp_dir_4,:file_modify_time_escape,:generate_db_cdr,:use_tmp,:copy_flag,:ftp_flag,:db_time;
+		if(sqlca.sqlcode)	
+		{
+			if(sqlca.sqlcode != 1403)
+				LOG_MSG("create_task_item_list_by_db error:%s .",sqlca.sqlerrm.sqlerrmc);
+			break;
+		}
+	
+		struct TASK_ITEM *_task;
+		_task=(TASK_ITEM *)pcalloc(permanent_pool, sizeof(*_task));
+		_task->sch_item.id=ftpparm_id;
+		if ( _task->sch_item.id==0 )
+			continue;
+		
+		strcpy( _task->sch_item.month, trim(month,"*"));
+		strcpy( _task->sch_item.day, trim(day,"*"));
+		strcpy( _task->sch_item.hour, trim(hour,"*"));
+		strcpy( _task->sch_item.min, trim(min,"*"));
+		
+		_task->sch_item.func=start_task;
+		_task->sch_item.arg=_task->sch_item.id;
+		strcpy( _task->ftp_host, trim(ftp_host,"NULL"));
+		strcpy( _task->ftp_path, trim(ftp_path,"NULL"));
+		strcpy( _task->local_path, trim(local_path,"NULL"));
+		strcpy( _task->file, trim(file_pattern,"NULL"));	
+		
+		_task->direction = direction;		
+		_task->del_src = del_src;
+		_task->file_ctime_escape = file_modify_time_escape;
+		_task->use_tmp = use_tmp;
+		_task->copy_flag = copy_flag;
+		_task->generate_db_cdr = generate_db_cdr;
+		strcpy(_task->sh_file, trim(sh_file,"NO"));	 
+		strcpy(_task->son_dir_mask,trim(son_dir_mask,"NULL"));
+		strcpy(_task->cp_dir_1, trim(cp_dir_1,"NULL"));
+		strcpy(_task->cp_dir_2, trim(cp_dir_2,"NULL"));
+		strcpy(_task->cp_dir_3, trim(cp_dir_3,"NULL"));
+		strcpy(_task->cp_dir_4, trim(cp_dir_4,"NULL"));
+                _task->ftp_flag = ftp_flag;
+                db_time.arr[db_time.len]='\0';
+                strcpy(g_db_time,(const char*)db_time.arr);
+		if (_cur!=NULL)
+			_cur->next=_task;	
+		else
+			_task_list=_task;
+		_cur=_task;
+		_task->next=NULL;
+		nCount +=1;
+	}
+	EXEC SQL at db236 close cfg_cursor;
+	LOG_MSG("Get ftp task count [%d].", nCount);	
+    printf("Get ftp task count [%d].\n", nCount);
+	return nCount;
+}   
+
